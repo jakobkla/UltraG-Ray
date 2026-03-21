@@ -35,8 +35,8 @@ struct UnscentedTransformParameters {
 
     // Parameters controlling validity of the unscented transform results
     float in_image_margin_factor =
-        0.1f; // 10% out of bounds margin is acceptable for "valid" projection
-              // state
+        0.1f; // 10% out of bounds margin is acceptable
+              // for "valid" projection state
     bool require_all_sigma_points_valid =
         false; // true: all sigma points must be valid to mark a projection as
                // "valid" false: a single valid sigma point is sufficient to
@@ -51,8 +51,10 @@ struct FThetaCameraDistortionParameters {
         ANGLE_TO_PIXELDIST,
     };
     PolynomialType reference_poly;
-    std::array<float, PolynomialDegree> pixeldist_to_angle_poly; // backward polynomial
-    std::array<float, PolynomialDegree> angle_to_pixeldist_poly; // forward polynomial
+    std::array<float, PolynomialDegree>
+        pixeldist_to_angle_poly; // backward polynomial
+    std::array<float, PolynomialDegree>
+        angle_to_pixeldist_poly; // forward polynomial
     float max_angle;
     std::array<float, 3> linear_cde;
 };

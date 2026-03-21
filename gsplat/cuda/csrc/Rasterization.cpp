@@ -741,7 +741,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_from_world_3d
     uint32_t C = viewmats0.size(-3);     // number of cameras
     // uint32_t N = means.size(-2);         // number of gaussians
     uint32_t channels = colors.size(-1);
-    assert (channels == 3); // only support RGB for now
 
     at::DimVector renders_shape(batch_dims);
     renders_shape.append({C, image_height, image_width, channels});
@@ -824,9 +823,9 @@ rasterize_to_pixels_from_world_3dgs_bwd(
     const at::Tensor means,  // [..., N, 3]
     const at::Tensor quats,  // [..., N, 4]
     const at::Tensor scales, // [..., N, 3]
-    const at::Tensor colors,                    // [..., C, N, 3] or [nnz, 3]
+    const at::Tensor colors,                    // [..., C, N, channels] or [nnz, channels]
     const at::Tensor opacities,                 // [..., C, N] or [nnz]
-    const at::optional<at::Tensor> backgrounds, // [..., C, 3]
+    const at::optional<at::Tensor> backgrounds, // [..., C, channels]
     const at::optional<at::Tensor> masks,       // [..., C, tile_height, tile_width]
     // image size
     const uint32_t image_width,
@@ -851,7 +850,7 @@ rasterize_to_pixels_from_world_3dgs_bwd(
     const at::Tensor render_alphas, // [..., C, image_height, image_width, 1]
     const at::Tensor last_ids,      // [..., C, image_height, image_width]
     // gradients of outputs
-    const at::Tensor v_render_colors, // [..., C, image_height, image_width, 3]
+    const at::Tensor v_render_colors, // [..., C, image_height, image_width, channels]
     const at::Tensor v_render_alphas // [..., C, image_height, image_width, 1]
 ) {
     DEVICE_GUARD(means);
@@ -950,5 +949,200 @@ rasterize_to_pixels_from_world_3dgs_bwd(
         v_means, v_quats, v_scales, v_colors, v_opacities
     );
 }
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+rasterize_to_pixels_ultrasound_3dgs_bwd(
+    // Gaussian parameters
+    const at::Tensor means,  // [..., N, 3]
+    const at::Tensor quats,  // [..., N, 4]
+    const at::Tensor scales, // [..., N, 3]
+    const at::Tensor intensities,               // [..., C, N, 1] or [nnz, 1]
+    const at::Tensor transmittances,            // [..., C, N] or [nnz]
+    const at::optional<at::Tensor> backgrounds, // [..., C, 1]
+    const at::optional<at::Tensor> masks,       // [..., C, tile_height, tile_width]
+    // image size
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size_x,
+    const uint32_t tile_size_y,
+    // camera
+    const at::Tensor viewmats0,               // [..., C, 4, 4]
+    const bool convex,
+    const float near_plane,
+    const float far_plane,
+    const float opening_angle,
+    const float opening_width,
+    // intersections
+    const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // forward outputs
+    const at::Tensor render_ultrasound,     // [..., C, image_height, image_width, 1]
+    const at::Tensor render_echo_alphas,    // [..., C, image_height, image_width, 1]
+    const at::Tensor render_transmittances, // [..., C, image_height, image_width, 1]
+    const at::Tensor last_ids,              // [..., C, image_height, image_width]
+    // gradients of outputs
+    const at::Tensor v_render_ultrasound,   // [..., C, image_height, image_width, 1]
+    const at::Tensor v_render_echo_alphas,  // [..., C, image_height, image_width, 1]
+    const at::Tensor v_render_transmittances// [..., C, image_height, image_width, 1]
+) {
+    DEVICE_GUARD(means);
+    CHECK_INPUT(means);
+    CHECK_INPUT(quats);
+    CHECK_INPUT(scales);
+    CHECK_INPUT(intensities);
+    CHECK_INPUT(tile_offsets);
+    CHECK_INPUT(flatten_ids);
+    CHECK_INPUT(render_ultrasound);
+    CHECK_INPUT(render_echo_alphas);
+    CHECK_INPUT(last_ids);
+    CHECK_INPUT(v_render_ultrasound);
+    CHECK_INPUT(v_render_echo_alphas);
+    CHECK_INPUT(v_render_transmittances);
+    if (backgrounds.has_value()) {
+        CHECK_INPUT(backgrounds.value());
+    }
+    if (masks.has_value()) {
+        CHECK_INPUT(masks.value());
+    }
+
+    at::Tensor v_means = at::zeros_like(means);
+    at::Tensor v_quats = at::zeros_like(quats);
+    at::Tensor v_scales = at::zeros_like(scales);
+    at::Tensor v_intensities = at::zeros_like(intensities);
+    at::Tensor v_transmittances = at::zeros_like(transmittances);
+
+    launch_rasterize_to_pixels_ultrasound_3dgs_bwd_kernel(
+        means,
+        quats,
+        scales,
+        intensities,
+        transmittances,
+        backgrounds,
+        masks,
+        image_width,
+        image_height,
+        tile_size_x,
+        tile_size_y,
+        viewmats0,
+        convex,
+        near_plane,
+        far_plane,
+        opening_angle,
+        opening_width,
+        tile_offsets,
+        flatten_ids,
+        render_ultrasound,
+        render_echo_alphas,
+        render_transmittances,
+        last_ids,
+        v_render_ultrasound,
+        v_render_echo_alphas,
+        v_render_transmittances,
+        v_means,
+        v_quats,
+        v_scales,
+        v_intensities,
+        v_transmittances
+    );
+
+    return std::make_tuple(
+        v_means, v_quats, v_scales, v_intensities, v_transmittances
+    );
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> rasterize_to_pixels_ultrasound_3dgs_fwd(
+    // Gaussian parameters
+    const at::Tensor means,     // [..., N, 3]
+    const at::Tensor quats,     // [..., N, 4]
+    const at::Tensor scales,    // [..., N, 3]
+    const at::Tensor intensities,               // [..., C, N, 1] or [nnz, 1]
+    const at::Tensor transmittances,            // [..., C, N] or [nnz]
+    const at::optional<at::Tensor> backgrounds, // [..., C, 1]
+    const at::optional<at::Tensor> masks,       // [..., C, tile_height, tile_width]
+    // image size
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size_x,
+    const uint32_t tile_size_y,
+    // camera
+    const at::Tensor viewmats0,               // [..., C, 4, 4]
+    const bool convex,
+    const float near_plane,
+    const float far_plane,
+    const float opening_angle,
+    const float opening_width,
+    // intersections
+    const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
+    const at::Tensor flatten_ids   // [n_isects]
+) {
+    DEVICE_GUARD(means);
+    CHECK_INPUT(means);
+    CHECK_INPUT(quats);
+    CHECK_INPUT(scales);
+    CHECK_INPUT(intensities);
+    CHECK_INPUT(transmittances);
+    CHECK_INPUT(tile_offsets);
+    CHECK_INPUT(flatten_ids);
+
+    if (backgrounds.has_value()) {
+        CHECK_INPUT(backgrounds.value());
+    }
+    if (masks.has_value()) {
+        CHECK_INPUT(masks.value());
+    }
+    
+    auto opt = means.options();
+    at::DimVector batch_dims(means.sizes().slice(0, means.dim() - 2));
+    uint32_t c = viewmats0.size(-3);     // number of cameras
+
+    at::DimVector ultrasound_shape(batch_dims);
+    ultrasound_shape.append({c, image_height, image_width, 1});
+    at::Tensor render_ultrasound = at::empty(ultrasound_shape, opt);
+
+    at::DimVector echo_alphas_shape(batch_dims);
+    echo_alphas_shape.append({c, image_height, image_width, 1});
+    at::Tensor render_echo_alphas = at::empty(echo_alphas_shape, opt);
+
+    at::DimVector transmittances_shape(batch_dims);
+    transmittances_shape.append({c, image_height, image_width, 1});
+    at::Tensor render_transmittances = at::empty(transmittances_shape, opt);
+
+    at::DimVector echoes_shape(batch_dims);
+    echoes_shape.append({c, image_height, image_width, 1});
+    at::Tensor render_echoes = at::empty(echoes_shape, opt);
+
+    at::DimVector last_ids_shape(batch_dims);
+    last_ids_shape.append({c, image_height, image_width});
+    at::Tensor last_ids = at::empty(last_ids_shape, opt.dtype(at::kInt));
+
+    launch_rasterize_to_pixels_ultrasound_3dgs_fwd_kernel(
+        means,
+        quats,
+        scales,
+        intensities,
+        transmittances,
+        backgrounds,
+        masks,
+        image_width,
+        image_height,
+        tile_size_x,
+        tile_size_y,
+        viewmats0,
+        convex,
+        near_plane,
+        far_plane,
+        opening_angle,
+        opening_width,
+        tile_offsets,
+        flatten_ids,
+        render_ultrasound,
+        render_echo_alphas,
+        render_transmittances,
+        render_echoes,
+        last_ids
+    );
+
+    return std::make_tuple(render_ultrasound, render_echo_alphas, render_transmittances, render_echoes, last_ids);
+};
 
 } // namespace gsplat

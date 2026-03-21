@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "torch", "ninja"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "UltraG-Ray"
+description = "Physics-Based Gaussian Ray Casting for Novel Ultrasound View Synthesis"
+version = "1.0"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.8"
+dependencies = [
+    "fused-ssim @ git+https://github.com/rahul-goel/fused-ssim@328dc9836f513d00c4b5bc38fe30478b4435cbb5",
+    "gdown",
+    "imageio[ffmpeg]",
+    "jaxtyping",
+    "matplotlib",
+    "nerfview @ git+https://github.com/nerfstudio-project/nerfview@4538024fe0d15fd1a0e4d760f3695fc44ca72787",
+    "ninja",
+    "numpy<2.0.0",
+    "opencv-python",
+    "Pillow",
+    "piq",
+    "pytorch_msssim",
+    "pyyaml",
+    "rich>=12",
+    "scikit-learn",
+    "splines",
+    "tensorboard",
+    "tensorly",
+    "torch",
+    "torchmetrics[image]",
+    "tqdm",
+    "tyro>=0.8.8",
+    "viser",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "build",
+    "isort",
+    "pylint",
+    "typeguard>=2.13.3",
+]
+
+[tool.setuptools.packages.find]
+include = ["gsplat*"]
+
+[tool.setuptools.package-data]
+"*" = ["*"]

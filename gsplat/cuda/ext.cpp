@@ -30,6 +30,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("intersect_tile", &gsplat::intersect_tile);
     m.def("intersect_offset", &gsplat::intersect_offset);
 
+    m.def("intersect_tile_rectangular", &gsplat::intersect_tile_rectangular);
+    m.def("intersect_offset_rectangular", &gsplat::intersect_offset_rectangular);
+
     m.def("projection_ewa_simple_fwd", &gsplat::projection_ewa_simple_fwd);
     m.def("projection_ewa_simple_bwd", &gsplat::projection_ewa_simple_bwd);
     m.def(
@@ -71,6 +74,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("projection_ut_3dgs_fused", &gsplat::projection_ut_3dgs_fused);
     m.def("rasterize_to_pixels_from_world_3dgs_fwd", &gsplat::rasterize_to_pixels_from_world_3dgs_fwd);
     m.def("rasterize_to_pixels_from_world_3dgs_bwd", &gsplat::rasterize_to_pixels_from_world_3dgs_bwd);
+
+    m.def("rasterize_to_pixels_ultrasound_3dgs_fwd", &gsplat::rasterize_to_pixels_ultrasound_3dgs_fwd);
+    m.def("rasterize_to_pixels_ultrasound_3dgs_bwd", &gsplat::rasterize_to_pixels_ultrasound_3dgs_bwd);
 
     // Cameras from 3DGUT
     py::enum_<ShutterType>(m, "ShutterType")

@@ -151,7 +151,7 @@ def adam(
 def spherical_harmonics(
     degrees_to_use: int,
     dirs: Tensor,  # [..., 3]
-    coeffs: Tensor,  # [..., K, 3]
+    coeffs: Tensor,  # [..., K, C]
     masks: Optional[Tensor] = None,  # [...,]
 ) -> Tensor:
     """Computes spherical harmonics.
@@ -159,20 +159,18 @@ def spherical_harmonics(
     Args:
         degrees_to_use: The degree to be used.
         dirs: Directions. [..., 3]
-        coeffs: Coefficients. [..., K, 3]
+        coeffs: Coefficients. [..., K, C] where C #color channels
         masks: Optional boolen masks to skip some computation. [...,] Default: None.
 
     Returns:
-        Spherical harmonics. [..., 3]
+        Spherical harmonics. [..., C]
     """
     assert (degrees_to_use + 1) ** 2 <= coeffs.shape[-2], coeffs.shape
     batch_dims = dirs.shape[:-1]
     assert dirs.shape == batch_dims + (3,), dirs.shape
-    assert (
-        (len(coeffs.shape) == len(batch_dims) + 2)
-        and coeffs.shape[:-2] == batch_dims
-        and coeffs.shape[-1] == 3
-    ), coeffs.shape
+    assert (len(coeffs.shape) == len(batch_dims) + 2) and coeffs.shape[
+        :-2
+    ] == batch_dims, coeffs.shape
     if masks is not None:
         assert masks.shape == batch_dims, masks.shape
         masks = masks.contiguous()
@@ -538,6 +536,283 @@ def isect_offset_encode(
     return _make_lazy_cuda_func("intersect_offset")(
         isect_ids.contiguous(), n_images, tile_width, tile_height
     )
+
+
+@torch.no_grad()
+def isect_tiles_rectangular(
+    means2d: Tensor,  # [..., N, 2] or [nnz, 2]
+    radii: Tensor,  # [..., N, 2] or [nnz, 2]
+    depths: Tensor,  # [..., N] or [nnz]
+    tile_size_x: int,
+    tile_size_y: int,
+    tile_width: int,
+    tile_height: int,
+    sort: bool = True,
+    segmented: bool = False,
+    packed: bool = False,
+    n_images: Optional[int] = None,
+    image_ids: Optional[Tensor] = None,
+    gaussian_ids: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """Maps projected Gaussians to intersecting rectangular tiles.
+
+    Args:
+        means2d: Projected Gaussian means. [..., N, 2] if packed is False, [nnz, 2] if packed is True.
+        radii: Maximum radii of the projected Gaussians. [..., N, 2] if packed is False, [nnz, 2] if packed is True.
+        depths: Z-depth of the projected Gaussians. [..., N] if packed is False, [nnz] if packed is True.
+        tile_size_x: Tile width in pixels.
+        tile_size_y: Tile height in pixels.
+        tile_width: Number of tiles horizontally.
+        tile_height: Number of tiles vertically.
+        sort: If True, the returned intersections will be sorted by the intersection ids. Default: True.
+        segmented: If True, segmented radix sort will be used to sort the intersections. Default: False.
+        packed: If True, the input tensors are packed. Default: False.
+        n_images: Number of images. Required if packed is True.
+        image_ids: The image indices of the projected Gaussians. Required if packed is True.
+        gaussian_ids: The column indices of the projected Gaussians. Required if packed is True.
+
+    Returns:
+        A tuple:
+
+        - **Tiles per Gaussian**. The number of tiles intersected by each Gaussian.
+          Int32 [..., N] if packed is False, Int32 [nnz] if packed is True.
+        - **Intersection ids**. Each id is an 64-bit integer with the following
+          information: image_id (Xc bits) | tile_id (Xt bits) | depth (32 bits).
+          Xc and Xt are the maximum number of bits required to represent the image and
+          tile ids, respectively. Int64 [n_isects]
+        - **Flatten ids**. The global flatten indices in [I * N] or [nnz] (packed). [n_isects]
+    """
+    if packed:
+        nnz = means2d.size(0)
+        assert means2d.shape == (nnz, 2), means2d.shape
+        assert radii.shape == (nnz, 2), radii.shape
+        assert depths.shape == (nnz,), depths.shape
+        assert image_ids is not None, "image_ids is required if packed is True"
+        assert gaussian_ids is not None, "gaussian_ids is required if packed is True"
+        assert n_images is not None, "n_images is required if packed is True"
+        image_ids = image_ids.contiguous()
+        gaussian_ids = gaussian_ids.contiguous()
+        I = n_images
+
+    else:
+        image_dims = means2d.shape[:-2]
+        I = math.prod(image_dims)
+        N = means2d.shape[-2]
+        assert means2d.shape == image_dims + (N, 2), means2d.shape
+        assert radii.shape == image_dims + (N, 2), radii.shape
+        assert depths.shape == image_dims + (N,), depths.shape
+
+    tiles_per_gauss, isect_ids, flatten_ids = _make_lazy_cuda_func(
+        "intersect_tile_rectangular"
+    )(
+        means2d.contiguous(),
+        radii.contiguous(),
+        depths.contiguous(),
+        image_ids,
+        gaussian_ids,
+        I,
+        tile_size_x,
+        tile_size_y,
+        tile_width,
+        tile_height,
+        sort,
+        segmented,
+    )
+    return tiles_per_gauss, isect_ids, flatten_ids
+
+
+@torch.no_grad()
+def isect_offset_encode_rectangular(
+    isect_ids: Tensor,
+    n_images: int,
+    tile_width: int,
+    tile_height: int,
+) -> Tensor:
+    """Encodes intersection ids to offsets for rectangular tiles.
+
+    Args:
+        isect_ids: Intersection ids. [n_isects]
+        n_images: Number of images.
+        tile_width: Number of tiles horizontally.
+        tile_height: Number of tiles vertically.
+
+    Returns:
+        Offsets. [I, tile_height, tile_width]
+    """
+    return _make_lazy_cuda_func("intersect_offset_rectangular")(
+        isect_ids.contiguous(), n_images, tile_width, tile_height
+    )
+
+
+def ultrasound_rasterize_to_pixels(
+    means: Tensor,  # [..., N, 3]
+    quats: Tensor,  # [..., N, 4]
+    scales: Tensor,  # [..., N, 3]
+    intensities: Tensor,  # [..., C, N, D]
+    transmittances: Tensor,  # [..., C, N]
+    viewmats: Tensor,  # [..., C, 4, 4]
+    image_width: int,
+    image_height: int,
+    tile_size_x: int,
+    tile_size_y: int,
+    isect_offsets: Tensor,  # [..., C, tile_height, tile_width]
+    flatten_ids: Tensor,  # [n_isects]
+    backgrounds: Optional[Tensor] = None,  # [..., C, channels]
+    masks: Optional[Tensor] = None,  # [..., C, tile_height, tile_width]
+    convex: bool = False,
+    near_plane: float = 0.01,
+    far_plane: float = 1e10,
+    opening_angle: float = 0.0,
+    opening_width: float = 0.0,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Rasterizes 3D Gaussians to ultrasound B-mode pixels.
+    Supports both convex probes (perspective rays fanning from the probe origin)
+    and linear probes (parallel rays along the probe width).
+
+    Args:
+        means: The 3D centers of the Gaussians. [..., N, 3]
+        quats: The quaternions of the Gaussians (wxyz convention). [..., N, 4]
+        scales: The scales of the Gaussians. [..., N, 3]
+        intensities: Echo intensities. [..., C, N, D]
+        transmittances: Per-Gaussian acoustic transmittance. [..., C, N]
+        viewmats: World-to-camera transformations. [..., C, 4, 4]
+        image_width: Output image width in pixels.
+        image_height: Output image height in pixels.
+        tile_size_x: Lateral tile size in pixels.
+        tile_size_y: Axial tile size in pixels.
+        isect_offsets: Intersection offsets from ``isect_offset_encode_rectangular()``.
+            [..., C, tile_height, tile_width]
+        flatten_ids: Global flatten indices from ``isect_tiles_rectangular()``. [n_isects]
+        backgrounds: Background colors. [..., C, channels]. Default: None.
+        masks: Optional tile mask to skip rendering. [..., C, tile_height, tile_width].
+            Default: None.
+        convex: If True, use convex (perspective) probe geometry; otherwise linear
+            (orthographic). Default: False.
+        near_plane: Near clipping plane. Default: 0.01.
+        far_plane: Far clipping plane. Default: 1e10.
+        opening_angle: Angular field of view in degrees (convex probe). Default: 0.0.
+        opening_width: Physical probe width in scene units (linear probe). Default: 0.0.
+
+    Returns:
+        A tuple:
+
+        - **Rendered ultrasound**: Final B-mode image (echo × transmittance).
+          [..., C, image_height, image_width, channels]
+        - **Rendered echo alphas**: Accumulated echo alpha.
+          [..., C, image_height, image_width, 1]
+        - **Rendered transmittances**: Accumulated transmittance along each ray.
+          [..., C, image_height, image_width, 1]
+        - **Rendered echoes**: Echo intensity only (without transmittance).
+          [..., C, image_height, image_width, channels]
+    """
+    batch_dims = means.shape[:-2]
+    num_batch_dims = len(batch_dims)
+    N = means.size(-2)
+    C = viewmats.size(-3)
+    channels = intensities.shape[-1]
+    device = means.device
+
+    assert means.shape == batch_dims + (N, 3), means.shape
+    assert quats.shape == batch_dims + (N, 4), quats.shape
+    assert scales.shape == batch_dims + (N, 3), scales.shape
+    assert viewmats.shape == batch_dims + (C, 4, 4), viewmats.shape
+
+    assert intensities.ndim in (
+        num_batch_dims + 2,
+        num_batch_dims + 3,
+    ), intensities.shape
+    if intensities.ndim == num_batch_dims + 2:
+        raise NotImplementedError("packed mode is not supported yet")
+        assert (
+            intensities.shape[:-2] == batch_dims and intensities.shape[-1] == channels
+        ), intensities.shape
+    else:
+        assert intensities.shape == batch_dims + (C, N, channels), intensities.shape
+    assert transmittances.shape == intensities.shape[:-1], transmittances.shape
+
+    if backgrounds is not None:
+        assert backgrounds.shape == batch_dims + (C, channels), backgrounds.shape
+        backgrounds = backgrounds.contiguous()
+
+    if masks is not None:
+        assert masks.shape == isect_offsets.shape, masks.shape
+        masks = masks.contiguous()
+
+    # Pad the channels to the nearest supported number if necessary
+    channels = intensities.shape[-1]
+    if channels > 513 or channels == 0:
+        # TODO: maybe worth to support zero channels?
+        raise ValueError(f"Unsupported number of color channels: {channels}")
+    if channels not in (
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        16,
+        17,
+        32,
+        33,
+        64,
+        65,
+        128,
+        129,
+        256,
+        257,
+        512,
+        513,
+    ):
+        padded_channels = (1 << (channels - 1).bit_length()) - channels
+        intensities = torch.cat(
+            [
+                intensities,
+                torch.zeros(*intensities.shape[:-1], padded_channels, device=device),
+            ],
+            dim=-1,
+        )
+    else:
+        padded_channels = 0
+
+    tile_height, tile_width = isect_offsets.shape[-2:]
+    assert (
+        tile_height * tile_size_y >= image_height
+    ), f"Assert Failed: {tile_height} * {tile_size_y} >= {image_height}"
+    assert (
+        tile_width * tile_size_x >= image_width
+    ), f"Assert Failed: {tile_width} * {tile_size_x} >= {image_width}"
+
+    (
+        render_ultrasound,
+        render_echo_alphas,
+        render_transmittances,
+        render_echoes,
+    ) = _RasterizeToPixelsUltrasound.apply(
+        means.contiguous(),
+        quats.contiguous(),
+        scales.contiguous(),
+        intensities.contiguous(),
+        transmittances.contiguous(),
+        backgrounds.contiguous() if backgrounds is not None else None,
+        masks.contiguous() if masks is not None else None,
+        viewmats.contiguous(),
+        image_width,
+        image_height,
+        tile_size_x,
+        tile_size_y,
+        isect_offsets.contiguous(),
+        flatten_ids.contiguous(),
+        convex,
+        near_plane,
+        far_plane,
+        opening_angle,
+        opening_width,
+    )
+
+    if padded_channels > 0:
+        render_ultrasound = render_ultrasound[..., :-padded_channels]
+    return render_ultrasound, render_echo_alphas, render_transmittances, render_echoes
 
 
 def rasterize_to_pixels(
@@ -1160,94 +1435,6 @@ class _FullyFusedProjection(torch.autograd.Function):
         )
 
 
-def fully_fused_projection_with_ut(
-    means: Tensor,  # [..., N, 3]
-    quats: Tensor,  # [..., N, 4]
-    scales: Tensor,  # [..., N, 3]
-    opacities: Optional[Tensor],  # [..., N]
-    viewmats: Tensor,  # [..., C, 4, 4]
-    Ks: Tensor,  # [..., C, 3, 3]
-    width: int,
-    height: int,
-    eps2d: float = 0.3,
-    near_plane: float = 0.01,
-    far_plane: float = 1e10,
-    radius_clip: float = 0.0,
-    calc_compensations: bool = False,
-    camera_model: Literal["pinhole", "ortho", "fisheye", "ftheta"] = "pinhole",
-    ut_params: UnscentedTransformParameters = UnscentedTransformParameters(),
-    # distortion
-    radial_coeffs: Optional[Tensor] = None,  # [..., C, 6] or [..., C, 4]
-    tangential_coeffs: Optional[Tensor] = None,  # [..., C, 2]
-    thin_prism_coeffs: Optional[Tensor] = None,  # [..., C, 4]
-    ftheta_coeffs: Optional[FThetaCameraDistortionParameters] = None,
-    # rolling shutter
-    rolling_shutter: RollingShutterType = RollingShutterType.GLOBAL,
-    viewmats_rs: Optional[Tensor] = None,  # [..., C, 4, 4]
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    """Projects Gaussians to 2D using Unscented Transform (UT).
-
-    similar to `fully_fused_projection()`, but supports camera distortion and
-    rolling shutter.
-
-    .. warning::
-        This function is not differentiable to any input.
-    """
-    batch_dims = means.shape[:-2]
-    N = means.shape[-2]
-    C = viewmats.shape[-3]
-    assert means.shape == batch_dims + (N, 3), means.shape
-    assert quats.shape == batch_dims + (N, 4), quats.shape
-    assert scales.shape == batch_dims + (N, 3), scales.shape
-    if opacities is not None:
-        assert opacities.shape == batch_dims + (N,), opacities.shape
-    assert viewmats.shape == batch_dims + (C, 4, 4), viewmats.shape
-    assert Ks.shape == batch_dims + (C, 3, 3), Ks.shape
-    if radial_coeffs is not None:
-        assert radial_coeffs.shape[:-1] == batch_dims + (C,) and radial_coeffs.shape[
-            -1
-        ] in [6, 4], radial_coeffs.shape
-    if tangential_coeffs is not None:
-        assert tangential_coeffs.shape == batch_dims + (C, 2), tangential_coeffs.shape
-    if thin_prism_coeffs is not None:
-        assert thin_prism_coeffs.shape == batch_dims + (C, 4), thin_prism_coeffs.shape
-    if viewmats_rs is not None:
-        assert viewmats_rs.shape == batch_dims + (C, 4, 4), viewmats_rs.shape
-
-    camera_model_type = _make_lazy_cuda_obj(f"CameraModelType.{camera_model.upper()}")
-
-    radii, means2d, depths, conics, compensations = _make_lazy_cuda_func(
-        "projection_ut_3dgs_fused"
-    )(
-        means.contiguous(),
-        quats.contiguous(),
-        scales.contiguous(),
-        opacities.contiguous() if opacities is not None else None,
-        viewmats.contiguous(),
-        viewmats_rs.contiguous() if viewmats_rs is not None else None,
-        Ks.contiguous(),
-        width,
-        height,
-        eps2d,
-        near_plane,
-        far_plane,
-        radius_clip,
-        calc_compensations,
-        camera_model_type,
-        ut_params.to_cpp(),
-        rolling_shutter.to_cpp(),
-        radial_coeffs.contiguous() if radial_coeffs is not None else None,
-        tangential_coeffs.contiguous() if tangential_coeffs is not None else None,
-        thin_prism_coeffs.contiguous() if thin_prism_coeffs is not None else None,
-        ftheta_coeffs.to_cpp()
-        if ftheta_coeffs is not None
-        else FThetaCameraDistortionParameters.to_cpp_default(),
-    )
-    if not calc_compensations:
-        compensations = None
-    return radii, means2d, depths, conics, compensations
-
-
 class _RasterizeToPixels(torch.autograd.Function):
     """Rasterize gaussians"""
 
@@ -1375,6 +1562,192 @@ class _RasterizeToPixels(torch.autograd.Function):
             None,
             None,
             None,
+        )
+
+
+class _RasterizeToPixelsUltrasound(torch.autograd.Function):
+    """Rasterize gaussians"""
+
+    @staticmethod
+    def forward(
+        ctx,
+        means: Tensor,  # [..., N, 3]
+        quats: Tensor,  # [..., N, 4]
+        scales: Tensor,  # [..., N, 3]
+        intensities: Tensor,  # [..., C, N, D] or [nnz, D]
+        transmittances: Tensor,  # [..., C, N] or [nnz]
+        backgrounds: Tensor,  # [..., channels], Optional
+        masks: Tensor,  # [..., tile_height, tile_width], Optional
+        viewmats: Tensor,  # [..., C, 4, 4]
+        width: int,
+        height: int,
+        tile_size_x: int,
+        tile_size_y: int,
+        isect_offsets: Tensor,  # [..., C, tile_height, tile_width]
+        flatten_ids: Tensor,  # [..., n_isects]
+        convex: bool,
+        near_plane: float,
+        far_plane: float,
+        opening_angle: float,
+        opening_width: float,
+    ) -> Tuple[Tensor, Tensor, Tensor]:
+        (
+            render_ultrasound,
+            render_echo_alphas,
+            render_transmittances,
+            render_echoes,
+            last_ids,
+        ) = _make_lazy_cuda_func("rasterize_to_pixels_ultrasound_3dgs_fwd")(
+            means,
+            quats,
+            scales,
+            intensities,
+            transmittances,
+            backgrounds,
+            masks,
+            width,
+            height,
+            tile_size_x,
+            tile_size_y,
+            viewmats,
+            convex,
+            near_plane,
+            far_plane,
+            opening_angle,
+            opening_width,
+            isect_offsets,
+            flatten_ids,
+        )
+
+        ctx.save_for_backward(
+            means,
+            quats,
+            scales,
+            intensities,
+            transmittances,
+            backgrounds,
+            masks,
+            viewmats,
+            isect_offsets,
+            flatten_ids,
+            render_ultrasound,
+            render_echo_alphas,
+            render_transmittances,
+            last_ids,
+        )
+        ctx.width = width
+        ctx.height = height
+        ctx.convex = convex
+        ctx.near_plane = near_plane
+        ctx.far_plane = far_plane
+        ctx.opening_angle = opening_angle
+        ctx.opening_width = opening_width
+        ctx.tile_size_x = tile_size_x
+        ctx.tile_size_y = tile_size_y
+
+        return (
+            render_ultrasound,
+            render_echo_alphas,
+            render_transmittances,
+            render_echoes,
+        )
+
+    @staticmethod
+    def backward(
+        ctx,
+        v_render_ultrasound: Tensor,  # [..., C, H, W, 3]
+        v_render_echo_alphas: Tensor,  # [..., C, H, W, 1]
+        v_render_transmittances: Tensor,  # [..., C, H, W, 1]
+        v_render_echoes: Tensor,  # [..., C, H, W, CDIM]
+    ):
+        (
+            means,
+            quats,
+            scales,
+            colors,
+            transmittances,
+            backgrounds,
+            masks,
+            viewmats,
+            isect_offsets,
+            flatten_ids,
+            render_colors,
+            render_echo_alphas,
+            render_transmittances,
+            last_ids,
+        ) = ctx.saved_tensors
+        width = ctx.width
+        height = ctx.height
+        convex = ctx.convex
+        near_plane = ctx.near_plane
+        far_plane = ctx.far_plane
+        opening_angle = ctx.opening_angle
+        opening_width = ctx.opening_width
+        tile_size_x = ctx.tile_size_x
+        tile_size_y = ctx.tile_size_y
+
+        (v_means, v_quats, v_scales, v_colors, v_transmittances) = _make_lazy_cuda_func(
+            "rasterize_to_pixels_ultrasound_3dgs_bwd"
+        )(
+            means,
+            quats,
+            scales,
+            colors,
+            transmittances,
+            backgrounds,
+            masks,
+            width,
+            height,
+            tile_size_x,
+            tile_size_y,
+            viewmats,
+            convex,
+            near_plane,
+            far_plane,
+            opening_angle,
+            opening_width,
+            isect_offsets,
+            flatten_ids,
+            render_colors,
+            render_echo_alphas,
+            render_transmittances,
+            last_ids,
+            v_render_ultrasound.contiguous(),
+            v_render_echo_alphas.contiguous(),
+            v_render_transmittances.contiguous(),
+        )
+
+        if ctx.needs_input_grad[6]:  # backgrounds
+            v_backgrounds = (
+                v_render_ultrasound * (1.0 - render_echo_alphas).float()
+            ).sum(dim=(-3, -2))
+        else:
+            v_backgrounds = None
+
+        if ctx.needs_input_grad[8]:  # viewmats
+            raise NotImplementedError
+
+        return (
+            v_means,  # [..., N, 3]
+            v_quats,  # [..., N, 4]
+            v_scales,  # [..., N, 3]
+            v_colors,  # [..., C, N, channels] or [nnz, channels]
+            v_transmittances,  # [..., C, N] or [nnz]
+            v_backgrounds,  # [..., C, channels] or None
+            None,  # masks (no gradient needed)
+            None,  # viewmats (not implemented yet)
+            None,  # width (int, no gradient)
+            None,  # height (int, no gradient)
+            None,  # tile_size_x (int, no gradient)
+            None,  # tile_size_y (int, no gradient)
+            None,  # isect_offsets (no gradient needed)
+            None,  # flatten_ids (no gradient needed)
+            None,  # convex (bool, no gradient)
+            None,  # near_plane (float, no gradient)
+            None,  # far_plane (float, no gradient)
+            None,  # opening_angle (float, no gradient)
+            None,  # opening_width (float, no gradient)
+            None,  # ut_params (object, no gradient)
         )
 
 
@@ -1509,9 +1882,13 @@ class _RasterizeToPixelsEval3D(torch.autograd.Function):
         tile_size = ctx.tile_size
         ftheta_coeffs = ctx.ftheta_coeffs
 
-        (v_means, v_quats, v_scales, v_colors, v_opacities,) = _make_lazy_cuda_func(
-            "rasterize_to_pixels_from_world_3dgs_bwd"
-        )(
+        (
+            v_means,
+            v_quats,
+            v_scales,
+            v_colors,
+            v_opacities,
+        ) = _make_lazy_cuda_func("rasterize_to_pixels_from_world_3dgs_bwd")(
             means,
             quats,
             scales,
@@ -1829,779 +2206,3 @@ class _SphericalHarmonics(torch.autograd.Function):
         if not compute_v_dirs:
             v_dirs = None
         return None, v_dirs, v_coeffs, None
-
-
-###### 2DGS ######
-def fully_fused_projection_2dgs(
-    means: Tensor,  # [..., N, 3]
-    quats: Tensor,  # [..., N, 4]
-    scales: Tensor,  # [..., N, 3]
-    viewmats: Tensor,  # [..., C, 4, 4]
-    Ks: Tensor,  # [..., C, 3, 3]
-    width: int,
-    height: int,
-    eps2d: float = 0.3,
-    near_plane: float = 0.01,
-    far_plane: float = 1e10,
-    radius_clip: float = 0.0,
-    packed: bool = False,
-    sparse_grad: bool = False,
-) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Prepare Gaussians for rasterization
-
-    This function prepares ray-splat intersection matrices, computes
-    per splat bounding box and 2D means in image space.
-
-    Args:
-        means: Gaussian means. [..., N, 3]
-        quats: Quaternions (No need to be normalized). [..., N, 4].
-        scales: Scales. [..., N, 3].
-        viewmats: World-to-camera matrices. [..., C, 4, 4]
-        Ks: Camera intrinsics. [..., C, 3, 3]
-        width: Image width.
-        height: Image height.
-        near_plane: Near plane distance. Default: 0.01.
-        far_plane: Far plane distance. Default: 200.
-        radius_clip: Gaussians with projected radii smaller than this value will be ignored. Default: 0.0.
-        packed: If True, the output tensors will be packed into a flattened tensor. Default: False.
-        sparse_grad (Experimental): This is only effective when `packed` is True. If True, during backward the gradients
-          of {`means`, `covars`, `quats`, `scales`} will be a sparse Tensor in COO layout. Default: False.
-
-    Returns:
-        A tuple:
-
-        If `packed` is True:
-
-        - **batch_ids**. The batch indices of the projected Gaussians. Int32 tensor of shape [nnz].
-        - **camera_ids**. The camera indices of the projected Gaussians. Int32 tensor of shape [nnz].
-        - **gaussian_ids**. The column indices of the projected Gaussians. Int32 tensor of shape [nnz].
-        - **radii**. The maximum radius of the projected Gaussians in pixel unit. Int32 tensor of shape [nnz, 2].
-        - **means**. Projected Gaussian means in 2D. [nnz, 2]
-        - **depths**. The z-depth of the projected Gaussians. [nnz]
-        - **ray_transforms**. transformation matrices that transforms xy-planes in pixel spaces into splat coordinates (WH)^T in equation (9) in paper [nnz, 3, 3]
-        - **normals**. The normals in camera spaces. [nnz, 3]
-
-        If `packed` is False:
-
-        - **radii**. The maximum radius of the projected Gaussians in pixel unit. Int32 tensor of shape [..., C, N, 2].
-        - **means**. Projected Gaussian means in 2D. [..., C, N, 2]
-        - **depths**. The z-depth of the projected Gaussians. [..., C, N]
-        - **ray_transforms**. transformation matrices that transforms xy-planes in pixel spaces into splat coordinates [..., C, N, 3, 3]
-        - **normals**. The normals in camera spaces. [..., C, N, 3]
-
-    """
-    batch_dims = means.shape[:-2]
-    N = means.shape[-2]
-    C = viewmats.shape[-3]
-    assert means.shape == batch_dims + (N, 3), means.shape
-    assert viewmats.shape == batch_dims + (C, 4, 4), viewmats.shape
-    assert Ks.shape == batch_dims + (C, 3, 3), Ks.shape
-    means = means.contiguous()
-    assert quats is not None, "quats is required"
-    assert scales is not None, "scales is required"
-    assert quats.shape == batch_dims + (N, 4), quats.shape
-    assert scales.shape == batch_dims + (N, 3), scales.shape
-    quats = quats.contiguous()
-    scales = scales.contiguous()
-    if sparse_grad:
-        assert packed, "sparse_grad is only supported when packed is True"
-
-    viewmats = viewmats.contiguous()
-    Ks = Ks.contiguous()
-    if packed:
-        return _FullyFusedProjectionPacked2DGS.apply(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            near_plane,
-            far_plane,
-            radius_clip,
-            sparse_grad,
-        )
-    else:
-        return _FullyFusedProjection2DGS.apply(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            eps2d,
-            near_plane,
-            far_plane,
-            radius_clip,
-        )
-
-
-class _FullyFusedProjection2DGS(torch.autograd.Function):
-    """Projects Gaussians to 2D."""
-
-    @staticmethod
-    def forward(
-        ctx,
-        means: Tensor,  # [..., N, 3]
-        quats: Tensor,  # [..., N, 4]
-        scales: Tensor,  # [..., N, 3]
-        viewmats: Tensor,  # [..., C, 4, 4]
-        Ks: Tensor,  # [..., C, 3, 3]
-        width: int,
-        height: int,
-        eps2d: float,
-        near_plane: float,
-        far_plane: float,
-        radius_clip: float,
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        radii, means2d, depths, ray_transforms, normals = _make_lazy_cuda_func(
-            "projection_2dgs_fused_fwd"
-        )(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            eps2d,
-            near_plane,
-            far_plane,
-            radius_clip,
-        )
-        ctx.save_for_backward(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            radii,
-            ray_transforms,
-            normals,
-        )
-        ctx.width = width
-        ctx.height = height
-        ctx.eps2d = eps2d
-
-        return radii, means2d, depths, ray_transforms, normals
-
-    @staticmethod
-    def backward(ctx, v_radii, v_means2d, v_depths, v_ray_transforms, v_normals):
-        (
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            radii,
-            ray_transforms,
-            normals,
-        ) = ctx.saved_tensors
-        width = ctx.width
-        height = ctx.height
-        eps2d = ctx.eps2d
-        v_means, v_quats, v_scales, v_viewmats = _make_lazy_cuda_func(
-            "projection_2dgs_fused_bwd"
-        )(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            radii,
-            ray_transforms,
-            v_means2d.contiguous(),
-            v_depths.contiguous(),
-            v_normals.contiguous(),
-            v_ray_transforms.contiguous(),
-            ctx.needs_input_grad[3],  # viewmats_requires_grad
-        )
-        if not ctx.needs_input_grad[0]:
-            v_means = None
-        if not ctx.needs_input_grad[1]:
-            v_quats = None
-        if not ctx.needs_input_grad[2]:
-            v_scales = None
-        if not ctx.needs_input_grad[3]:
-            v_viewmats = None
-
-        return (
-            v_means,
-            v_quats,
-            v_scales,
-            v_viewmats,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-
-
-class _FullyFusedProjectionPacked2DGS(torch.autograd.Function):
-    """Projects Gaussians to 2D. Return packed tensors."""
-
-    @staticmethod
-    def forward(
-        ctx,
-        means: Tensor,  # [..., N, 3]
-        quats: Tensor,  # [..., N, 4]
-        scales: Tensor,  # [..., N, 3]
-        viewmats: Tensor,  # [..., C, 4, 4]
-        Ks: Tensor,  # [..., C, 3, 3]
-        width: int,
-        height: int,
-        near_plane: float,
-        far_plane: float,
-        radius_clip: float,
-        sparse_grad: bool,
-    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        (
-            indptr,
-            batch_ids,
-            camera_ids,
-            gaussian_ids,
-            radii,
-            means2d,
-            depths,
-            ray_transforms,
-            normals,
-        ) = _make_lazy_cuda_func("projection_2dgs_packed_fwd")(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            near_plane,
-            far_plane,
-            radius_clip,
-        )
-        ctx.save_for_backward(
-            batch_ids,
-            camera_ids,
-            gaussian_ids,
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            ray_transforms,
-        )
-        ctx.width = width
-        ctx.height = height
-        ctx.sparse_grad = sparse_grad
-
-        return (
-            batch_ids,
-            camera_ids,
-            gaussian_ids,
-            radii,
-            means2d,
-            depths,
-            ray_transforms,
-            normals,
-        )
-
-    @staticmethod
-    def backward(
-        ctx,
-        v_batch_ids,
-        v_camera_ids,
-        v_gaussian_ids,
-        v_radii,
-        v_means2d,
-        v_depths,
-        v_ray_transforms,
-        v_normals,
-    ):
-        (
-            batch_ids,
-            camera_ids,
-            gaussian_ids,
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            ray_transforms,
-        ) = ctx.saved_tensors
-        width = ctx.width
-        height = ctx.height
-        sparse_grad = ctx.sparse_grad
-
-        v_means, v_quats, v_scales, v_viewmats = _make_lazy_cuda_func(
-            "projection_2dgs_packed_bwd"
-        )(
-            means,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            batch_ids,
-            camera_ids,
-            gaussian_ids,
-            ray_transforms,
-            v_means2d.contiguous(),
-            v_depths.contiguous(),
-            v_ray_transforms.contiguous(),
-            v_normals.contiguous(),
-            ctx.needs_input_grad[3],  # viewmats_requires_grad
-            sparse_grad,
-        )
-
-        if sparse_grad:
-            batch_dims = means.shape[:-2]
-            B = math.prod(batch_dims)
-            N = means.shape[-2]
-
-        if not ctx.needs_input_grad[0]:
-            v_means = None
-        else:
-            if sparse_grad:
-                # TODO: gaussian_ids is duplicated so not ideal.
-                # An idea is to directly set the attribute (e.g., .sparse_grad) of
-                # the tensor but this requires the tensor to be leaf node only. And
-                # a customized optimizer would be needed in this case.
-                v_means = torch.sparse_coo_tensor(
-                    indices=gaussian_ids[None],
-                    values=v_means,  # [nnz, 3]
-                    size=means.shape,
-                    is_coalesced=len(viewmats) == 1,
-                )
-        if not ctx.needs_input_grad[1]:
-            v_quats = None
-        else:
-            if sparse_grad:
-                v_quats = torch.sparse_coo_tensor(
-                    indices=gaussian_ids[None],
-                    values=v_quats,  # [nnz, 4]
-                    size=quats.shape,
-                    is_coalesced=len(viewmats) == 1,
-                )
-        if not ctx.needs_input_grad[2]:
-            v_scales = None
-        else:
-            if sparse_grad:
-                v_scales = torch.sparse_coo_tensor(
-                    indices=gaussian_ids[None],
-                    values=v_scales,  # [nnz, 3]
-                    size=scales.shape,
-                    is_coalesced=len(viewmats) == 1,
-                )
-        if not ctx.needs_input_grad[3]:
-            v_viewmats = None
-
-        return (
-            v_means,
-            v_quats,
-            v_scales,
-            v_viewmats,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-
-
-def rasterize_to_pixels_2dgs(
-    means2d: Tensor,  # [..., N, 2]
-    ray_transforms: Tensor,  # [..., N, 3, 3]
-    colors: Tensor,  # [..., N, channels]
-    opacities: Tensor,  # [..., N]
-    normals: Tensor,  # [..., N, 3]
-    densify: Tensor,  # [..., N, 2]
-    image_width: int,
-    image_height: int,
-    tile_size: int,
-    isect_offsets: Tensor,  # [..., tile_height, tile_width]
-    flatten_ids: Tensor,  # [n_isects]
-    backgrounds: Optional[Tensor] = None,  # [..., channels]
-    masks: Optional[Tensor] = None,  # [..., tile_height, tile_width]
-    packed: bool = False,
-    absgrad: bool = False,
-    distloss: bool = False,
-) -> Tuple[Tensor, Tensor]:
-    """Rasterize Gaussians to pixels.
-
-    Args:
-        means2d: Projected Gaussian means. [..., N, 2] if packed is False, [nnz, 2] if packed is True.
-        ray_transforms: transformation matrices that transforms xy-planes in pixel spaces into splat coordinates. [..., N, 3, 3] if packed is False, [nnz, channels] if packed is True.
-        colors: Gaussian colors or ND features. [..., N, channels] if packed is False, [nnz, channels] if packed is True.
-        opacities: Gaussian opacities that support per-view values. [..., N] if packed is False, [nnz] if packed is True.
-        normals: The normals in camera space. [..., N, 3] if packed is False, [nnz, 3] if packed is True.
-        densify: Dummy variable to keep track of gradient for densification. [..., N, 2] if packed, [nnz, 3] if packed is True.
-        tile_size: Tile size.
-        isect_offsets: Intersection offsets outputs from `isect_offset_encode()`. [..., tile_height, tile_width]
-        flatten_ids: The global flatten indices in [I * N] or [nnz] from  `isect_tiles()`. [n_isects]
-        backgrounds: Background colors. [..., channels]. Default: None.
-        masks: Optional tile mask to skip rendering GS to masked tiles. [..., tile_height, tile_width]. Default: None.
-        packed: If True, the input tensors are expected to be packed with shape [nnz, ...]. Default: False.
-        absgrad: If True, the backward pass will compute a `.absgrad` attribute for `means2d`. Default: False.
-
-    Returns:
-        A tuple:
-
-        - **Rendered colors**.      [..., image_height, image_width, channels]
-        - **Rendered alphas**.      [..., image_height, image_width, 1]
-        - **Rendered normals**.     [..., image_height, image_width, 3]
-        - **Rendered distortion**.  [..., image_height, image_width, 1]
-        - **Rendered median depth**.[..., image_height, image_width, 1]
-
-
-    """
-    image_dims = means2d.shape[:-2]
-    channels = colors.shape[-1]
-    device = means2d.device
-    if packed:
-        nnz = means2d.size(0)
-        assert means2d.shape == (nnz, 2), means2d.shape
-        assert ray_transforms.shape == (nnz, 3, 3), ray_transforms.shape
-        assert colors.shape[0] == nnz, colors.shape
-        assert opacities.shape == (nnz,), opacities.shape
-    else:
-        N = means2d.size(-2)
-        assert means2d.shape == image_dims + (N, 2), means2d.shape
-        assert ray_transforms.shape == image_dims + (N, 3, 3), ray_transforms.shape
-        assert colors.shape[:-2] == image_dims, colors.shape
-        assert opacities.shape == image_dims + (N,), opacities.shape
-    if backgrounds is not None:
-        assert backgrounds.shape == image_dims + (channels,), backgrounds.shape
-        backgrounds = backgrounds.contiguous()
-
-    # Pad the channels to the nearest supported number if necessary
-    if channels > 512 or channels == 0:
-        # TODO: maybe worth to support zero channels?
-        raise ValueError(f"Unsupported number of color channels: {channels}")
-    if channels not in (1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512):
-        padded_channels = (1 << (channels - 1).bit_length()) - channels
-        # Make sure the depth (last channel if present) remains in the last channel after padding (for depth distortion and median depth in CUDA kernel)
-        colors = torch.cat(
-            [
-                colors[..., :-1],
-                torch.empty(*colors.shape[:-1], padded_channels, device=device),
-                colors[..., -1:],
-            ],
-            dim=-1,
-        )
-        if backgrounds is not None:
-            backgrounds = torch.cat(
-                [
-                    backgrounds,
-                    torch.zeros(
-                        *backgrounds.shape[:-1], padded_channels, device=device
-                    ),
-                ],
-                dim=-1,
-            )
-    else:
-        padded_channels = 0
-    tile_height, tile_width = isect_offsets.shape[-2:]
-    assert (
-        tile_height * tile_size >= image_height
-    ), f"Assert Failed: {tile_height} * {tile_size} >= {image_height}"
-    assert (
-        tile_width * tile_size >= image_width
-    ), f"Assert Failed: {tile_width} * {tile_size} >= {image_width}"
-
-    (
-        render_colors,
-        render_alphas,
-        render_normals,
-        render_distort,
-        render_median,
-    ) = _RasterizeToPixels2DGS.apply(
-        means2d.contiguous(),
-        ray_transforms.contiguous(),
-        colors.contiguous(),
-        opacities.contiguous(),
-        normals.contiguous(),
-        densify.contiguous(),
-        backgrounds,
-        masks,
-        image_width,
-        image_height,
-        tile_size,
-        isect_offsets.contiguous(),
-        flatten_ids.contiguous(),
-        absgrad,
-        distloss,
-    )
-
-    if padded_channels > 0:
-        render_colors = torch.cat(
-            [render_colors[..., : -padded_channels - 1], render_colors[..., -1:]],
-            dim=-1,
-        )
-
-    return render_colors, render_alphas, render_normals, render_distort, render_median
-
-
-@torch.no_grad()
-def rasterize_to_indices_in_range_2dgs(
-    range_start: int,
-    range_end: int,
-    transmittances: Tensor,  # [..., image_height, image_width]
-    means2d: Tensor,  # [..., N, 2]
-    ray_transforms: Tensor,  # [..., N, 3, 3]
-    opacities: Tensor,  # [..., N]
-    image_width: int,
-    image_height: int,
-    tile_size: int,
-    isect_offsets: Tensor,
-    flatten_ids: Tensor,
-) -> Tuple[Tensor, Tensor, Tensor]:
-    """Rasterizes a batch of Gaussians to images but only returns the indices.
-
-    .. note::
-
-        This function supports iterative rasterization, in which each call of this function
-        will rasterize a batch of Gaussians from near to far, defined by `[range_start, range_end)`.
-        If a one-step full rasterization is desired, set `range_start` to 0 and `range_end` to a really
-        large number, e.g, 1e10.
-
-    Args:
-        range_start: The start batch of Gaussians to be rasterized (inclusive).
-        range_end: The end batch of Gaussians to be rasterized (exclusive).
-        transmittances: Currently transmittances. [..., image_height, image_width]
-        means2d: Projected Gaussian means. [..., N, 2]
-        ray_transforms: transformation matrices that transforms xy-planes in pixel spaces into splat coordinates. [..., N, 3, 3]
-        opacities: Gaussian opacities that support per-view values. [..., N]
-        image_width: Image width.
-        image_height: Image height.
-        tile_size: Tile size.
-        isect_offsets: Intersection offsets outputs from `isect_offset_encode()`. [..., tile_height, tile_width]
-        flatten_ids: The global flatten indices in [I * N] from  `isect_tiles()`. [n_isects]
-
-    Returns:
-        A tuple:
-
-        - **Gaussian ids**. Gaussian ids for the pixel intersection. A flattened list of shape [M].
-        - **Pixel ids**. pixel indices (row-major). A flattened list of shape [M].
-        - **Camera ids**. Camera indices. A flattened list of shape [M].
-        - **Batch ids**. Batch indices. A flattened list of shape [M].
-    """
-
-    image_dims = means2d.shape[:-2]
-    tile_height, tile_width = isect_offsets.shape[-2:]
-    N = means2d.shape[-2]
-    assert transmittances.shape == image_dims + (
-        image_height,
-        image_width,
-    ), transmittances.shape
-    assert means2d.shape == image_dims + (N, 2), means2d.shape
-    assert ray_transforms.shape == image_dims + (N, 3, 3), ray_transforms.shape
-    assert opacities.shape == image_dims + (N,), opacities.shape
-    assert isect_offsets.shape == image_dims + (
-        tile_height,
-        tile_width,
-    ), isect_offsets.shape
-    assert (
-        tile_height * tile_size >= image_height
-    ), f"Assert Failed: {tile_height} * {tile_size} >= {image_height}"
-    assert (
-        tile_width * tile_size >= image_width
-    ), f"Assert Failed: {tile_width} * {tile_size} >= {image_width}"
-
-    out_gauss_ids, out_indices = _make_lazy_cuda_func("rasterize_to_indices_2dgs")(
-        range_start,
-        range_end,
-        transmittances.contiguous(),
-        means2d.contiguous(),
-        ray_transforms.contiguous(),
-        opacities.contiguous(),
-        image_width,
-        image_height,
-        tile_size,
-        isect_offsets.contiguous(),
-        flatten_ids.contiguous(),
-    )
-    out_pixel_ids = out_indices % (image_width * image_height)
-    out_image_ids = out_indices // (image_width * image_height)
-    return out_gauss_ids, out_pixel_ids, out_image_ids
-
-
-class _RasterizeToPixels2DGS(torch.autograd.Function):
-    """Rasterize gaussians 2DGS"""
-
-    @staticmethod
-    def forward(
-        ctx,
-        means2d: Tensor,
-        ray_transforms: Tensor,
-        colors: Tensor,
-        opacities: Tensor,
-        normals: Tensor,
-        densify: Tensor,
-        backgrounds: Tensor,
-        masks: Tensor,
-        width: int,
-        height: int,
-        tile_size: int,
-        isect_offsets: Tensor,
-        flatten_ids: Tensor,
-        absgrad: bool,
-        distloss: bool,
-    ) -> Tuple[Tensor, Tensor]:
-        (
-            render_colors,
-            render_alphas,
-            render_normals,
-            render_distort,
-            render_median,
-            last_ids,
-            median_ids,
-        ) = _make_lazy_cuda_func("rasterize_to_pixels_2dgs_fwd")(
-            means2d,
-            ray_transforms,
-            colors,
-            opacities,
-            normals,
-            backgrounds,
-            masks,
-            width,
-            height,
-            tile_size,
-            isect_offsets,
-            flatten_ids,
-        )
-
-        ctx.save_for_backward(
-            means2d,
-            ray_transforms,
-            colors,
-            opacities,
-            normals,
-            densify,
-            backgrounds,
-            masks,
-            isect_offsets,
-            flatten_ids,
-            render_colors,
-            render_alphas,
-            last_ids,
-            median_ids,
-        )
-        ctx.width = width
-        ctx.height = height
-        ctx.tile_size = tile_size
-        ctx.absgrad = absgrad
-        ctx.distloss = distloss
-
-        # double to float
-        render_alphas = render_alphas.float()
-        return (
-            render_colors,
-            render_alphas,
-            render_normals,
-            render_distort,
-            render_median,
-        )
-
-    @staticmethod
-    def backward(
-        ctx,
-        v_render_colors: Tensor,
-        v_render_alphas: Tensor,
-        v_render_normals: Tensor,
-        v_render_distort: Tensor,
-        v_render_median: Tensor,
-    ):
-
-        (
-            means2d,
-            ray_transforms,
-            colors,
-            opacities,
-            normals,
-            densify,
-            backgrounds,
-            masks,
-            isect_offsets,
-            flatten_ids,
-            render_colors,
-            render_alphas,
-            last_ids,
-            median_ids,
-        ) = ctx.saved_tensors
-        width = ctx.width
-        height = ctx.height
-        tile_size = ctx.tile_size
-        absgrad = ctx.absgrad
-
-        (
-            v_means2d_abs,
-            v_means2d,
-            v_ray_transforms,
-            v_colors,
-            v_opacities,
-            v_normals,
-            v_densify,
-        ) = _make_lazy_cuda_func("rasterize_to_pixels_2dgs_bwd")(
-            means2d,
-            ray_transforms,
-            colors,
-            opacities,
-            normals,
-            densify,
-            backgrounds,
-            masks,
-            width,
-            height,
-            tile_size,
-            isect_offsets,
-            flatten_ids,
-            render_colors,
-            render_alphas,
-            last_ids,
-            median_ids,
-            v_render_colors.contiguous(),
-            v_render_alphas.contiguous(),
-            v_render_normals.contiguous(),
-            v_render_distort.contiguous(),
-            v_render_median.contiguous(),
-            absgrad,
-        )
-        torch.cuda.synchronize()
-        if absgrad:
-            means2d.absgrad = v_means2d_abs
-
-        if ctx.needs_input_grad[6]:
-            v_backgrounds = (v_render_colors * (1.0 - render_alphas).float()).sum(
-                dim=(-3, -2)
-            )
-        else:
-            v_backgrounds = None
-
-        return (
-            v_means2d,
-            v_ray_transforms,
-            v_colors,
-            v_opacities,
-            v_normals,
-            v_densify,
-            v_backgrounds,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )

@@ -51,6 +51,6 @@ enum CameraModelType {
 };
 
 #define N_THREADS_PACKED 256
-#define ALPHA_THRESHOLD (1.f / 255.f)
+#define ALPHA_THRESHOLD (0.f)
 
 } // namespace gsplat

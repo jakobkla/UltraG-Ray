@@ -1,99 +1,171 @@
-# gsplat
+# UltraG-Ray: Physics-Based Gaussian Ray Casting for Novel Ultrasound View Synthesis
 
-[![Core Tests.](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/core_tests.yml)
-[![Docs](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml/badge.svg?branch=main)](https://github.com/nerfstudio-project/gsplat/actions/workflows/doc.yml)
+### [Paper (MIDL 2026)](https://openreview.net/forum?id=QIUjZpcGYz)
 
-[http://www.gsplat.studio/](http://www.gsplat.studio/)
+[Felix Duelmer](https://www.cs.cit.tum.de/camp/members/felix-duelmer/),
+[Jakob Klaushofer](https://openreview.net/profile?id=~Jakob_Klaushofer1),
+[Magdalena Wysocki](https://www.cs.cit.tum.de/camp/members/magdalena-wysocki/),
+[Nassir Navab](https://www.cs.cit.tum.de/camp/members/cv-nassir-navab/nassir-navab/),
+[Mohammad Farid Azampour](https://www.cs.cit.tum.de/camp/members/mohammad-farid-azampour/)
 
-gsplat is an open-source library for CUDA accelerated rasterization of gaussians with python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/), but we’ve made gsplat even faster, more memory efficient, and with a growing list of new features! 
+Technical University of Munich
 
-<div align="center">
-  <video src="https://github.com/nerfstudio-project/gsplat/assets/10151885/64c2e9ca-a9a6-4c7e-8d6f-47eeacd15159" width="100%" />
-</div>
+## Code Structure
 
-## News
+- **`trainer.py`**: Training script with configuration via CLI arguments or JSON config file
+- **`viewer.py`**: Launch viser web viewer and/or benchmarking from a checkpoint
+- **`gsplat/`**: Modified base of gsplat
+  - **`rendering.py`**: `ultrasound_rasterization()` and `ultrasound_3d_rasterization()` — wrappers for ultrasound rendering and a 3d representation 
+  - **`strategy/ultrasound.py`**: `Ultrasound3DStrategy` — strategy for gaussian pruing/splitting for density control
+  - **`cuda/csrc/`**: Custom CUDA kernels including:
+    - `RasterizeToPixelsUltrasound3DGSFwd.cu` — forward path
+    - `RasterizeToPixelsUltrasound3DGSBwd.cu` — backward path 
+- **`download_datasets.sh`**: Script to download datasets from Google Drive
 
-[May 2025] Arbitrary batching (over multiple scenes and multiple viewpoints) is supported now!! Checkout [here](docs/batch.md) for more details! Kudos to [Junchen Liu](https://junchenliu77.github.io/).
+## Getting Started
 
-[May 2025] [Jonathan Stephens](https://x.com/jonstephens85) makes a great [tutorial video](https://www.youtube.com/watch?v=ACPTiP98Pf8) for Windows users on how to install gsplat and get start with 3DGUT.
+### Prerequisites
 
-[April 2025] [NVIDIA 3DGUT](https://research.nvidia.com/labs/toronto-ai/3DGUT/) is now integrated in gsplat! Checkout [here](docs/3dgut.md) for more details. [[NVIDIA Tech Blog]](https://developer.nvidia.com/blog/revolutionizing-neural-reconstruction-and-rendering-in-gsplat-with-3dgut/) [[NVIDIA Sweepstakes]](https://www.nvidia.com/en-us/research/3dgut-sweepstakes/)
+- Python >= 3.9
+- CUDA-capable GPU
+- CUDA toolkit (version must match your PyTorch CUDA build, e.g. CUDA 11.8 with `+cu118`)
+- PyTorch
+- ninja
 
-## Installation
+### Step 1: Clone the Repository
 
-**Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
-
-The easiest way is to install from PyPI. In this way it will build the CUDA code **on the first run** (JIT).
-
-```bash
-pip install gsplat
+```sh
+git clone <your-repo-url>
+cd gsplat
+git submodule update --init --recursive
 ```
 
-Alternatively you can install gsplat from source. In this way it will build the CUDA code during installation.
+The CUDA code depends on the `glm` submodule in `gsplat/cuda/csrc/third_party/glm`.
 
-```bash
-pip install git+https://github.com/nerfstudio-project/gsplat.git
+### Step 2: Create Python Virtual Environment (if you want to)
+
+```sh
+python3 -m venv ultragray_env
+# or: python -m venv ultragray_env
+source ultragray_env/bin/activate
 ```
 
-We also provide [pre-compiled wheels](https://docs.gsplat.studio/whl) for both linux and windows on certain python-torch-CUDA combinations (please check first which versions are supported). Note this way you would have to manually install [gsplat's dependencies](https://github.com/nerfstudio-project/gsplat/blob/6022cf45a19ee307803aaf1f19d407befad2a033/setup.py#L115). For example, to install gsplat for pytorch 2.0 and cuda 11.8 you can run
-```
-pip install ninja numpy jaxtyping rich
-pip install gsplat --index-url https://docs.gsplat.studio/whl/pt20cu118
-```
+### Step 3: Install Dependencies
 
-To build gsplat from source on Windows, please check [this instruction](docs/INSTALL_WIN.md).
-
-## Evaluation
-
-This repo comes with a standalone script that reproduces the official Gaussian Splatting with exactly the same performance on PSNR, SSIM, LPIPS, and converged number of Gaussians. Powered by gsplat’s efficient CUDA implementation, the training takes up to **4x less GPU memory** with up to **15% less time** to finish than the official implementation. Full report can be found [here](https://docs.gsplat.studio/main/tests/eval.html).
-
-```bash
-cd examples
-pip install -r requirements.txt
-# download mipnerf_360 benchmark data
-python datasets/download_dataset.py
-# run batch evaluation
-bash benchmarks/basic.sh
+```sh
+pip install --upgrade pip setuptools wheel
+pip install -e .
 ```
 
-## Examples
+This will install all required dependencies, CUDA sources will be compiled later.
 
-We provide a set of examples to get you started! Below you can find the details about
-the examples (requires to install some exta dependencies via `pip install -r examples/requirements.txt`)
+If `pip install -e .` fails while building `fused-ssim`:
 
-- [Train a 3D Gaussian splatting model on a COLMAP capture.](https://docs.gsplat.studio/main/examples/colmap.html)
-- [Fit a 2D image with 3D Gaussians.](https://docs.gsplat.studio/main/examples/image.html)
-- [Render a large scene in real-time.](https://docs.gsplat.studio/main/examples/large_scale.html)
-
-
-## Development and Contribution
-
-This repository was born from the curiosity of people on the Nerfstudio team trying to understand a new rendering technique. We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software.
-
-This project is developed by the following wonderful contributors (unordered):
-
-- [Angjoo Kanazawa](https://people.eecs.berkeley.edu/~kanazawa/) (UC Berkeley): Mentor of the project.
-- [Matthew Tancik](https://www.matthewtancik.com/about-me) (Luma AI): Mentor of the project.
-- [Vickie Ye](https://people.eecs.berkeley.edu/~vye/) (UC Berkeley): Project lead. v0.1 lead.
-- [Matias Turkulainen](https://maturk.github.io/) (Aalto University): Core developer.
-- [Ruilong Li](https://www.liruilong.cn/) (UC Berkeley): Core developer. v1.0 lead.
-- [Justin Kerr](https://kerrj.github.io/) (UC Berkeley): Core developer.
-- [Brent Yi](https://github.com/brentyi) (UC Berkeley): Core developer.
-- [Zhuoyang Pan](https://panzhy.com/) (ShanghaiTech University): Core developer.
-- [Jianbo Ye](http://www.jianboye.org/) (Amazon): Core developer.
-
-We also have a white paper with about the project with benchmarking and mathematical supplement with conventions and derivations, available [here](https://arxiv.org/abs/2409.06765). If you find this library useful in your projects or papers, please consider citing:
-
+1. Install a CUDA-matching PyTorch build first (example for CUDA 11.8):
+```sh
+pip install --index-url https://download.pytorch.org/whl/cu118 torch torchvision
 ```
-@article{ye2025gsplat,
-  title={gsplat: An open-source library for Gaussian splatting},
-  author={Ye, Vickie and Li, Ruilong and Kerr, Justin and Turkulainen, Matias and Yi, Brent and Pan, Zhuoyang and Seiskari, Otto and Ye, Jianbo and Hu, Jeffrey and Tancik, Matthew and Angjoo Kanazawa},
-  journal={Journal of Machine Learning Research},
-  volume={26},
-  number={34},
-  pages={1--17},
-  year={2025}
+2. Retry without build isolation:
+```sh
+pip install -e . --no-build-isolation
+```
+
+### Step 4: Download Datasets (if needed)
+
+Download the porcine muscle and spine phantom datasets:
+
+```sh
+./download_datasets.sh
+```
+
+This downloads the data into the `data/` directory with the following structure:
+```
+data/
+├── pig_shoulder_v2/
+│   ├── images_train.npy    # Training images (N, H, W), grayscale [0, 255]
+│   ├── images_val.npy      # Validation images
+│   ├── poses_train.npy     # Training poses (N, 4, 4), camera-to-world
+│   ├── poses_val.npy       # Validation poses
+│   └── conf.json           # Dataset configuration for trainer
+└── spine_phantom/
+    ├── images_train.npy
+    ├── images_val.npy
+    ├── poses_train.npy
+    ├── poses_val.npy
+    └── conf.json
+```
+
+New datasets should follow the same structure.
+
+## Reproducing Results
+
+### Training on Porcine Muscle Dataset
+
+```sh
+bash train_pig_shoulder.sh
+```
+
+Or equivalently:
+
+```sh
+python trainer.py --config_file data/pig_shoulder_v2/conf.json
+```
+
+### Training on Spine Phantom Dataset
+
+```sh
+bash train_spine_phantom.sh
+```
+
+Or equivalently:
+
+```sh
+python trainer.py --config_file data/spine_phantom/conf.json
+```
+
+Results (checkpoints, PLY files, evaluation metrics) are saved to the `result_dir` specified in the config.
+For the given datasets this is `results` with subdirectories for the dataset names.
+Subsequent runs will overwrite existing data if there are conflicts.
+
+## Using the Web Viewer
+
+The Viewer has two modes:
+- Standalone: Via the render mode option you can switch between 3D and ultrasound views.
+- Split: Enter split mode by opening the URL inside a second browser window and tile them beside each other. This will lock the render mode option and display 3D and Ultrasound views side-by-side. They are synced, so you will see the position of the probe in 3D in real time and can also move it from the 3D view.
+
+## Visualize Trained Models
+
+Launch the interactive viewer to visualize trained models:
+
+```sh
+python viewer.py --ckpt results/pig_shoulder_v2/ckpts/ckpt_29999.pt
+```
+
+The viewer provides a web-based interface (via [viser](https://github.com/nerfstudio-project/viser)) for exploring the reconstructed ultrasound scene from arbitrary probe poses.
+
+Use `--benchmark` mode to measure rendering speed:
+
+```sh
+python viewer.py --ckpt results/pig_shoulder_v2/ckpts/ckpt_29999.pt --benchmark --benchmark_res_width 512 --benchmark_res_height 512 --config-file data/pig_shoulder_v2/conf.json
+```
+
+You must specify config file containing the training/validation poses and probe parameters.
+The resolution here doesn't correspond to the actual image proportions, that is defined by the probe parameters in the config file. 
+We can render at arbitrary resolutions after training.
+
+## Citation
+
+If you find this work useful, please cite:
+
+```bibtex
+@inproceedings{duelmer2026ultragray,
+  title={UltraG-Ray: Physics-Based Gaussian Ray Casting for Novel Ultrasound View Synthesis},
+  author={Duelmer, Felix and Klaushofer, Jakob and Wysocki, Magdalena and Navab, Nassir and Azampour, Mohammad Farid},
+  booktitle={Medical Imaging with Deep Learning (MIDL)},
+  year={2026}
 }
 ```
 
-We welcome contributions of any kind and are open to feedback, bug-reports, and improvements to help expand the capabilities of this software. Please check [docs/DEV.md](docs/DEV.md) for more info about development.
+## Acknowledgments
+
+This project builds upon [gsplat](https://github.com/nerfstudio-project/gsplat) by the Nerfstudio Team, licensed under the Apache License 2.0.

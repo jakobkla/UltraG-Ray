@@ -1,0 +1,1 @@
+python trainer.py --config_file data/spine_phantom/conf.json

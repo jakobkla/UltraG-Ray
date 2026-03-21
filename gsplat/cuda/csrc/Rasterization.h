@@ -54,7 +54,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     const at::Tensor tile_offsets,    // [..., tile_height, tile_width]
     const at::Tensor flatten_ids,     // [n_isects]
     // forward outputs
-    const at::Tensor render_alphas,   // [..., image_height, image_width, 1]
+    const at::Tensor render_echo_alphas,   // [..., image_height, image_width, 1]
     const at::Tensor last_ids,        // [..., image_height, image_width]
     // gradients of outputs
     const at::Tensor v_render_colors, // [..., image_height, image_width, 3]
@@ -273,5 +273,78 @@ void launch_rasterize_to_pixels_from_world_3dgs_bwd_kernel(
     at::Tensor v_colors,     // [..., C, N, 3] or [nnz, 3]
     at::Tensor v_opacities   // [..., C, N] or [nnz]
 ) ;
+
+void launch_rasterize_to_pixels_ultrasound_3dgs_bwd_kernel(
+    // Gaussian parameters
+    const at::Tensor means,  // [..., N, 3]
+    const at::Tensor quats,  // [..., N, 4]
+    const at::Tensor scales, // [..., N, 3]
+    const at::Tensor intensities,               // [..., C, N, 1] or [nnz, 1]
+    const at::Tensor transmittances,            // [..., C, N] or [nnz]
+    const at::optional<at::Tensor> backgrounds, // [..., C, 1]
+    const at::optional<at::Tensor> masks,       // [..., C, tile_height, tile_width]
+    // image size
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size_x,
+    const uint32_t tile_size_y,
+    // camera
+    const at::Tensor viewmats0,               // [..., C, 4, 4]
+    const bool convex,
+    const float near_plane,
+    const float far_plane,
+    const float opening_angle,
+    const float opening_width,
+    // intersections
+    const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // forward outputs
+    const at::Tensor render_ultrasound,     // [..., C, image_height, image_width, 1]
+    const at::Tensor render_echo_alphas,    // [..., C, image_height, image_width, 1]
+    const at::Tensor render_transmittances, // [..., C, image_height, image_width, 1]
+    const at::Tensor last_ids,              // [..., C, image_height, image_width]
+    // gradients of outputs
+    const at::Tensor v_render_ultrasound,       // [..., C, image_height, image_width, 1]
+    const at::Tensor v_render_echo_alphas,      // [..., C, image_height, image_width, 1]
+    const at::Tensor v_render_transmittances,   // [..., C, image_height, image_width, 1]
+    // outputs
+    at::Tensor v_means,      // [..., N, 3]
+    at::Tensor v_quats,      // [..., N, 4]
+    at::Tensor v_scales,     // [..., N, 3]
+    at::Tensor v_intensities,     // [..., C, N, 1] or [nnz, 1]
+    at::Tensor v_transmittances // [..., C, N] or [nnz]
+) ;
+
+void launch_rasterize_to_pixels_ultrasound_3dgs_fwd_kernel(
+    // Gaussian parameters
+    const at::Tensor means,     // [..., N, 3]
+    const at::Tensor quats,     // [..., N, 4]
+    const at::Tensor scales,    // [..., N, 3]
+    const at::Tensor intensities,    // [..., C, N, 1] or [nnz, 1]
+    const at::Tensor transmittances, // [..., C, N]  or [nnz]
+    const at::optional<at::Tensor> backgrounds, // [..., C, 1]
+    const at::optional<at::Tensor> masks,       // [..., C, tile_height, tile_width]
+    // image size
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size_x,
+    const uint32_t tile_size_y,
+    // camera
+    const at::Tensor viewmats0,    // [..., C, 4, 4]
+    const bool convex,
+    const float near_plane,
+    const float far_plane,
+    const float opening_angle,
+    const float opening_width,
+    // intersections
+    const at::Tensor tile_offsets, // [..., C, tile_height, tile_width]
+    const at::Tensor flatten_ids,  // [n_isects]
+    // outputs
+    at::Tensor render_ultrasound,       // [..., C, image_height, image_width, 1]
+    at::Tensor render_echo_alphas,      // [..., C, image_height, image_width]
+    at::Tensor render_transmittances,   // [..., C, image_height, image_width]
+    at::Tensor render_echoes,           // [..., C, image_height, image_width, 1]
+    at::Tensor last_ids                 // [..., C, image_height, image_width]
+);
 
 } // namespace gsplat

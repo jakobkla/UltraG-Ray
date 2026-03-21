@@ -493,8 +493,8 @@ def export_splats(
         scales (torch.Tensor): Splat scales. Shape (N, 3)
         quats (torch.Tensor): Splat quaternions. Shape (N, 4)
         opacities (torch.Tensor): Splat opacities. Shape (N,)
-        sh0 (torch.Tensor): Spherical harmonics. Shape (N, 1, 3)
-        shN (torch.Tensor): Spherical harmonics. Shape (N, K, 3)
+        sh0 (torch.Tensor): Spherical harmonics. Shape (N, 1, 3) or (N, 1, 1) for monochrome
+        shN (torch.Tensor): Spherical harmonics. Shape (N, K, 3) or (N, K, 1) for monochrome
         format (str): Export format. Options: "ply", "splat", "ply_compressed". Default: "ply"
         save_to (str): Output file path. If provided, the bytes will be written to file.
     """
@@ -503,10 +503,20 @@ def export_splats(
     assert scales.shape == (total_splats, 3), "Scales must be of shape (N, 3)"
     assert quats.shape == (total_splats, 4), "Quaternions must be of shape (N, 4)"
     assert opacities.shape == (total_splats,), "Opacities must be of shape (N,)"
-    assert sh0.shape == (total_splats, 1, 3), "sh0 must be of shape (N, 1, 3)"
+
     assert (
-        shN.ndim == 3 and shN.shape[0] == total_splats and shN.shape[2] == 3
-    ), f"shN must be of shape (N, K, 3), got {shN.shape}"
+        sh0.ndim == 3 and sh0.shape[0] == total_splats and sh0.shape[1] == 1
+    ), f"sh0 must be of shape (N, 1, 3) or (N, 1, 1), got {sh0.shape}"
+    if sh0.shape[2] == 1:
+        # Expand monochrome to grayscale RGB
+        sh0 = sh0.expand(-1, -1, 3)
+
+    assert (
+        shN.ndim == 3 and shN.shape[0] == total_splats
+    ), f"shN must be of shape (N, K, 3) or (N, K, 1), got {shN.shape}"
+    if shN.shape[2] == 1:
+        # Expand monochrome to grayscale RGB
+        shN = shN.expand(-1, -1, 3)
 
     # Reshape spherical harmonics
     sh0 = sh0.squeeze(1)  # Shape (N, 3)

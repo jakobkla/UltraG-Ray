@@ -1,0 +1,1 @@
+python trainer.py --config_file data/pig_shoulder_v2/conf.json

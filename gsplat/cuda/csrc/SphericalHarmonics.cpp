@@ -15,7 +15,7 @@ namespace gsplat {
 at::Tensor spherical_harmonics_fwd(
     const uint32_t degrees_to_use,
     const at::Tensor dirs,               // [..., 3]
-    const at::Tensor coeffs,             // [..., K, 3]
+    const at::Tensor coeffs,             // [..., K, C]
     const at::optional<at::Tensor> masks // [...]
 ) {
     DEVICE_GUARD(dirs);
@@ -24,24 +24,27 @@ at::Tensor spherical_harmonics_fwd(
     if (masks.has_value()) {
         CHECK_INPUT(masks.value());
     }
-    TORCH_CHECK(coeffs.size(-1) == 3, "coeffs must have last dimension 3");
     TORCH_CHECK(dirs.size(-1) == 3, "dirs must have last dimension 3");
 
-    at::Tensor colors = at::empty_like(dirs); // [..., 3]
+    const uint32_t C = coeffs.size(-1);
+    
+    auto output_shape = dirs.sizes().vec();
+    output_shape.back() = C;
+    at::Tensor colors = at::empty(output_shape, dirs.options()); // [..., C]
 
     launch_spherical_harmonics_fwd_kernel(
         degrees_to_use, dirs, coeffs, masks, colors
     );
-    return colors; // [..., 3]
+    return colors; // [..., C]
 }
 
 std::tuple<at::Tensor, at::Tensor> spherical_harmonics_bwd(
     const uint32_t K,
     const uint32_t degrees_to_use,
     const at::Tensor dirs,                // [..., 3]
-    const at::Tensor coeffs,              // [..., K, 3]
+    const at::Tensor coeffs,              // [..., K, C]
     const at::optional<at::Tensor> masks, // [...]
-    const at::Tensor v_colors,            // [..., 3]
+    const at::Tensor v_colors,            // [..., C]
     bool compute_v_dirs
 ) {
     DEVICE_GUARD(dirs);
@@ -51,9 +54,8 @@ std::tuple<at::Tensor, at::Tensor> spherical_harmonics_bwd(
     if (masks.has_value()) {
         CHECK_INPUT(masks.value());
     }
-    TORCH_CHECK(v_colors.size(-1) == 3, "v_colors must have last dimension 3");
-    TORCH_CHECK(coeffs.size(-1) == 3, "coeffs must have last dimension 3");
     TORCH_CHECK(dirs.size(-1) == 3, "dirs must have last dimension 3");
+    const uint32_t C = coeffs.size(-1);
     const uint32_t N = dirs.numel() / 3;
 
     at::Tensor v_coeffs = at::zeros_like(coeffs);
@@ -74,7 +76,7 @@ std::tuple<at::Tensor, at::Tensor> spherical_harmonics_bwd(
         v_coeffs,
         v_dirs.defined() ? at::optional<at::Tensor>(v_dirs) : c10::nullopt
     );
-    return std::make_tuple(v_coeffs, v_dirs); // [..., K, 3], [..., 3]
+    return std::make_tuple(v_coeffs, v_dirs); // [..., K, C], [..., 3]
 }
 
 } // namespace gsplat
