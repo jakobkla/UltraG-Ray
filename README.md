@@ -1,12 +1,8 @@
 # UltraG-Ray: Physics-Based Gaussian Ray Casting for Novel Ultrasound View Synthesis
 
-### [Paper (MIDL 2026)](https://openreview.net/forum?id=QIUjZpcGYz)
+### [Project Page](https://felixduelmer.github.io/publications/ultragray.html) | [Paper (MIDL 2026)](https://openreview.net/forum?id=QIUjZpcGYz)
 
-[Felix Duelmer](https://www.cs.cit.tum.de/camp/members/felix-duelmer/),
-[Jakob Klaushofer](https://openreview.net/profile?id=~Jakob_Klaushofer1),
-[Magdalena Wysocki](https://www.cs.cit.tum.de/camp/members/magdalena-wysocki/),
-[Nassir Navab](https://www.cs.cit.tum.de/camp/members/cv-nassir-navab/nassir-navab/),
-[Mohammad Farid Azampour](https://www.cs.cit.tum.de/camp/members/mohammad-farid-azampour/)
+[Felix Duelmer](https://felixduelmer.github.io/), [Jakob Klaushofer](https://openreview.net/profile?id=~Jakob_Klaushofer1), [Magdalena Wysocki](https://www.cs.cit.tum.de/camp/members/magdalena-wysocki/), [Nassir Navab](https://www.cs.cit.tum.de/camp/members/cv-nassir-navab/nassir-navab/), [Mohammad Farid Azampour](https://www.cs.cit.tum.de/camp/members/mohammad-farid-azampour/)
 
 Technical University of Munich
 
